@@ -1,47 +1,45 @@
 # Single-Server Key-Value Store Report
 
-## Introduction
-
-This project implements a basic single-server key-value store using Python and Flask. The server supports storing, retrieving, and deleting key-value pairs through HTTP requests. It also includes thread-safe concurrent access, persistent storage using a JSON file, timestamped operation logging, error handling, and performance benchmarking for throughput and latency.
-
 ## Design Decisions and Justification
 
-Python was selected because it is simple, readable, and well suited for developing small network applications. Flask was used to implement the HTTP server because it provides lightweight support for REST-style APIs and allows the required store, retrieve, and delete operations to be implemented with minimal complexity.
+This project implements a single-server key-value store using Python and Flask. The server runs on port 8080 and supports GET, PUT, and DELETE operations for retrieving, storing, and removing key-value pairs. HTTP POST is also supported for storing values so that the application remains compatible with the benchmark provided for the assignment.
 
-The key-value data is stored in a Python dictionary because dictionary lookup, insertion, and deletion operations are efficient for a simple in-memory key-value store. The logical PUT operation is implemented using HTTP POST so that the server remains compatible with the benchmark provided for the assignment.
+The key-value data is maintained in an in-memory Python dictionary because dictionary lookup, insertion, update, and deletion are efficient for a simple key-value store. A global threading lock protects the shared dictionary during concurrent access. This prevents race conditions when multiple requests attempt to read, update, or delete shared data at the same time.
 
-A global threading lock is used to protect the shared dictionary during concurrent access. This prevents race conditions when multiple requests attempt to read, update, or delete shared data at the same time. A single global lock was retained because testing showed that it performed better than lock striping for the small number of concurrent worker threads used in the benchmark.
+Persistence is implemented using a background thread that periodically saves the in-memory store to a JSON file. PUT and DELETE operations update memory immediately and mark the store as modified, while the disk write is performed separately every five seconds when necessary. Existing data is restored from the JSON file when the server starts.
 
-Persistence is implemented using a background thread that periodically saves the in-memory store to a JSON file. Store and DELETE operations update the in-memory dictionary and mark the data as modified, while the actual disk write occurs separately. This reduces request latency because client requests do not need to wait for file I/O. When the server starts, previously saved data is loaded from the JSON file. A final save is also attempted when the application exits normally.
+All GET, PUT, and DELETE operations are recorded with timestamps. Logging is performed asynchronously using a queue and background logging thread so that requests do not need to wait for log-file writes.
 
-Operation logging is handled asynchronously using a queue and a background logging thread. GET, store, and DELETE operations are recorded with timestamps in a log file. Flask access logging was disabled during benchmarking because the application already records its own operation logs and unnecessary console output introduced additional performance overhead.
+Flask is used for API routing and request handling, while Waitress is used as the WSGI server. Waitress provides persistent HTTP connections and more appropriate server behavior for benchmarking than the Flask development server.
 
 ## Challenges Faced
 
-One major challenge was handling concurrent requests safely. Since multiple request threads can access the same shared dictionary, a threading lock was used to prevent conflicting operations and maintain consistent data.
+The main challenge was safely handling concurrent requests. Since several request threads can access the same dictionary, a threading lock was used to maintain consistent data and safely handle concurrent modifications.
 
-Another challenge was maintaining persistence without significantly reducing server performance. Saving the complete store after every modification increased latency, so persistence was moved to a background thread that periodically saves modified data.
+Another challenge was providing persistence without significantly increasing request latency. Writing the complete store to disk after every modification caused unnecessary overhead, so persistence was moved to a background thread.
 
-During development, issues were also encountered with Flask startup output, logging configuration, thread synchronization, and Python string formatting. These problems were resolved through incremental testing and direct HTTP requests.
+Performance testing also showed that the Flask development server closed the TCP connection after each request. Replacing it with Waitress allowed persistent connections and reduced connection overhead. Benchmark performance was also less consistent when the project was stored inside a OneDrive synchronized directory. Running the application from a normal local directory reduced background filesystem interference.
 
 ## Assumptions
 
-The server is designed to run on a single machine and listen on port 8080. Keys are treated as strings, while values are expected to contain JSON-compatible data.
+The application runs as a single server on one machine and listens on port 8080. Keys are represented as strings, and values must be JSON-compatible. Only one server instance is expected to write to the persistence file.
 
-The persistence mechanism assumes that only one server instance writes to the JSON storage file. The benchmark is executed locally against the Flask server using 127.0.0.1, so the measured latency primarily represents application processing and local operating system overhead rather than real network latency.
+The benchmark is executed locally using `127.0.0.1`, so the measured latency mainly represents application processing, HTTP handling, thread scheduling, logging, persistence overhead, and local operating-system activity rather than real network latency.
 
 ## Potential Improvements
 
-Future versions could use a database or log-based storage system instead of a JSON file to provide stronger durability, faster recovery, and improved scalability. More advanced concurrency mechanisms could also be considered for workloads with a much larger number of simultaneous clients.
-
-Additional improvements could include authentication, configurable ports, key expiration, replication, distributed storage across multiple servers, stronger failure recovery, and deployment using a production WSGI server instead of the Flask development server.
+Future versions could use a database or append-only log instead of a JSON file for stronger durability and faster recovery. Other improvements could include authentication, configurable ports, key expiration, replication, distributed storage, health monitoring, more advanced concurrency control, and percentile-based latency measurements.
 
 ## Benchmark Results
 
-The benchmark was executed using 3 concurrent worker threads with a total of 300 HTTP operations per run.
+The final benchmark used **3 concurrent client threads** and **300 individual HTTP operations per run**. No client-side batching was used. Persistent HTTP connections were reused through `requests.Session`.
 
-Across three benchmark runs, all 300 operations completed successfully with zero failures in every run. The average throughput was approximately 919.84 operations per second, and the average latency was approximately 0.00323 seconds per operation.
+| Run | Throughput | Average Latency |
+| --- | ---: | ---: |
+| 1 | 1873.28 operations/sec | 1.5889 ms |
+| 2 | 2119.01 operations/sec | 1.4000 ms |
+| 3 | 2069.63 operations/sec | 1.4344 ms |
 
-The best observed run achieved approximately 926.85 operations per second with an average latency of 0.00322 seconds per operation.
+Across the three runs, the average throughput was approximately **2020.64 operations per second**, with an average latency of approximately **1.4744 milliseconds per operation**.
 
-These results indicate that the implementation can handle concurrent local requests efficiently while maintaining correct store, retrieve, delete, logging, persistence, and error-handling behavior.
+All **300 attempted operations completed successfully with zero failures** in every run. The best observed run achieved **2119.01 operations per second** with an average latency of **1.4000 milliseconds per operation**.

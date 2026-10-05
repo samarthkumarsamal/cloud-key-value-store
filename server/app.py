@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
+from waitress import serve
 
 import threading
 import logging
@@ -144,7 +145,7 @@ def home():
     return "Key-Value Store Server is Running"
 
 
-@app.route("/<key>", methods=["POST"])
+@app.route("/<key>", methods=["POST", "PUT"])
 def put_value(key):
     data = request.get_json(silent=True)
 
@@ -247,9 +248,8 @@ atexit.register(shutdown_handler)
 
 
 if __name__ == "__main__":
-    app.run(
+    serve(
+        app,
         host="127.0.0.1",
-        port=8080,
-        debug=False,
-        threaded=True
+        port=8080
     )

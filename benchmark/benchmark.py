@@ -3,45 +3,53 @@ import queue
 import requests
 import time
 
+
 BASE_URL = "http://127.0.0.1:8080"
 
+# Benchmark configuration
 NUM_THREADS = 3
-OPS_PER_THREAD = 100
-PRINT_INTERVAL = 3
+TOTAL_OPS = 300
 
-# Total number of HTTP operations
-TOTAL_OPS = NUM_THREADS * OPS_PER_THREAD
+# Each task performs one POST and one GET
+if TOTAL_OPS % 2 != 0:
+    raise ValueError("TOTAL_OPS must be an even number")
 
-# Each task performs one SET and one GET
 NUM_TASKS = TOTAL_OPS // 2
 
+
+# Queue containing key-value tasks
 operations_queue = queue.Queue()
-latencies_queue = queue.Queue()
 
-# Stores every latency for the final result
-all_latencies = []
-latency_lock = threading.Lock()
-
-# Counters
-successful_ops = 0
-failed_ops = 0
-counter_lock = threading.Lock()
-
-# Used to start all worker threads together
+# Start synchronization
 start_event = threading.Event()
 
+# Main thread + all worker threads
+ready_barrier = threading.Barrier(NUM_THREADS + 1)
 
-def kv_store_operation(op_type, key, value=None):
+# Each worker submits its final results here
+results_queue = queue.Queue()
+
+
+def kv_store_operation(session, op_type, key, value=None):
+    """
+    Perform one individual HTTP request.
+
+    Connection reuse is enabled through requests.Session(),
+    but every POST and GET remains a separate request.
+    """
+
     try:
         if op_type == "set":
-            response = requests.post(
+            response = session.post(
                 f"{BASE_URL}/{key}",
-                json={"value": value}
+                json={"value": value},
+                timeout=5
             )
 
         elif op_type == "get":
-            response = requests.get(
-                f"{BASE_URL}/{key}"
+            response = session.get(
+                f"{BASE_URL}/{key}",
+                timeout=5
             )
 
         else:
@@ -50,7 +58,7 @@ def kv_store_operation(op_type, key, value=None):
         response.raise_for_status()
         return True
 
-    except Exception as error:
+    except requests.RequestException as error:
         print(
             f"Error during {op_type} operation "
             f"for key '{key}': {error}"
@@ -58,106 +66,95 @@ def kv_store_operation(op_type, key, value=None):
         return False
 
 
-def record_operation(success, latency=None):
-    global successful_ops, failed_ops
-
-    with counter_lock:
-        if success:
-            successful_ops += 1
-        else:
-            failed_ops += 1
-
-    if success and latency is not None:
-        latencies_queue.put(latency)
-
-        with latency_lock:
-            all_latencies.append(latency)
-
-
 def worker_thread():
-    # Wait until benchmark begins
+    """
+    Each worker uses its own persistent HTTP session.
+    """
+
+    session = requests.Session()
+
+    # Ignore proxy settings from the operating system.
+    # This is useful for localhost benchmarking.
+    session.trust_env = False
+
+    local_latencies = []
+    local_successful = 0
+    local_failed = 0
+
+    # Signal that this worker is ready.
+    ready_barrier.wait()
+
+    # Wait until benchmark timing begins.
     start_event.wait()
 
     while True:
         try:
             key, value = operations_queue.get_nowait()
+
         except queue.Empty:
             break
 
-        # PUT operation
-        start_time = time.time()
+        # -------------------------------------------------
+        # POST operation
+        # -------------------------------------------------
+
+        start_time = time.perf_counter()
 
         success = kv_store_operation(
+            session,
             "set",
             key,
             value
         )
 
-        latency = time.time() - start_time
+        latency = time.perf_counter() - start_time
 
-        record_operation(
-            success,
-            latency if success else None
-        )
+        if success:
+            local_successful += 1
+            local_latencies.append(latency)
+        else:
+            local_failed += 1
 
+
+        # -------------------------------------------------
         # GET operation
-        start_time = time.time()
+        # -------------------------------------------------
+
+        start_time = time.perf_counter()
 
         success = kv_store_operation(
+            session,
             "get",
             key
         )
 
-        latency = time.time() - start_time
+        latency = time.perf_counter() - start_time
 
-        record_operation(
-            success,
-            latency if success else None
-        )
+        if success:
+            local_successful += 1
+            local_latencies.append(latency)
+        else:
+            local_failed += 1
+
 
         operations_queue.task_done()
 
+    session.close()
 
-def monitor_performance():
-    last_print = time.time()
-
-    while True:
-        time.sleep(PRINT_INTERVAL)
-
-        current_time = time.time()
-        elapsed_time = current_time - last_print
-
-        interval_latencies = []
-
-        while not latencies_queue.empty():
-            try:
-                interval_latencies.append(
-                    latencies_queue.get_nowait()
-                )
-            except queue.Empty:
-                break
-
-        if interval_latencies:
-            avg_latency = (
-                sum(interval_latencies)
-                / len(interval_latencies)
-            )
-
-            throughput = (
-                len(interval_latencies)
-                / elapsed_time
-            )
-
-            print(
-                f"[Last {PRINT_INTERVAL} seconds] "
-                f"Throughput: {throughput:.2f} ops/sec, "
-                f"Avg Latency: {avg_latency:.5f} sec/op"
-            )
-
-        last_print = current_time
+    # Submit this worker's results once at the end.
+    results_queue.put(
+        (
+            local_successful,
+            local_failed,
+            local_latencies
+        )
+    )
 
 
-# Create SET/GET tasks
+# ---------------------------------------------------------
+# Create workload
+# ---------------------------------------------------------
+
 for i in range(NUM_TASKS):
     key = f"key_{i}"
     value = f"value_{i}"
@@ -167,73 +164,102 @@ for i in range(NUM_TASKS):
     )
 
 
+# ---------------------------------------------------------
 # Create worker threads
+# ---------------------------------------------------------
+
 threads = [
     threading.Thread(target=worker_thread)
     for _ in range(NUM_THREADS)
 ]
 
 
-# Create monitoring thread
-monitoring_thread = threading.Thread(
-    target=monitor_performance,
-    daemon=True
-)
-
-monitoring_thread.start()
-
-
-# Start benchmark timer
-start_time = time.time()
-
-# Allow workers to begin
-start_event.set()
-
-
-# Start worker threads
+# Start workers before benchmark timing.
 for thread in threads:
     thread.start()
 
 
-# Wait for workers to finish
+# Wait until all workers have initialized their sessions.
+ready_barrier.wait()
+
+
+# ---------------------------------------------------------
+# Start benchmark
+# ---------------------------------------------------------
+
+benchmark_start = time.perf_counter()
+
+start_event.set()
+
+
+# Wait for all workers to finish.
 for thread in threads:
     thread.join()
 
 
-# Calculate total benchmark time
-total_time = time.time() - start_time
+benchmark_end = time.perf_counter()
+
+total_time = benchmark_end - benchmark_start
 
 
-# Calculate final average latency
-with latency_lock:
-    if all_latencies:
-        average_latency = (
-            sum(all_latencies)
-            / len(all_latencies)
-        )
-    else:
-        average_latency = float("nan")
+# ---------------------------------------------------------
+# Collect results
+# ---------------------------------------------------------
+
+successful_ops = 0
+failed_ops = 0
+all_latencies = []
 
 
-# Calculate successful throughput
-throughput = (
-    successful_ops / total_time
-    if total_time > 0
-    else 0
-)
+while not results_queue.empty():
+    worker_successful, worker_failed, worker_latencies = (
+        results_queue.get()
+    )
+
+    successful_ops += worker_successful
+    failed_ops += worker_failed
+    all_latencies.extend(worker_latencies)
 
 
-# Display final results
+# ---------------------------------------------------------
+# Calculate statistics
+# ---------------------------------------------------------
+
+if all_latencies:
+    average_latency = (
+        sum(all_latencies)
+        / len(all_latencies)
+    )
+else:
+    average_latency = float("nan")
+
+
+if total_time > 0:
+    throughput = successful_ops / total_time
+else:
+    throughput = 0
+
+
+average_latency_ms = average_latency * 1000
+
+
+# ---------------------------------------------------------
+# Display results
+# ---------------------------------------------------------
+
 print("\nFinal Results:")
+print(f"Client threads: {NUM_THREADS}")
 print(f"Total attempted operations: {TOTAL_OPS}")
 print(f"Successful operations: {successful_ops}")
 print(f"Failed operations: {failed_ops}")
-print(f"Total time: {total_time:.2f} seconds")
+print(f"Total time: {total_time:.6f} seconds")
+
 print(
     f"Throughput: "
     f"{throughput:.2f} operations per second"
 )
+
 print(
     f"Average Latency: "
-    f"{average_latency:.5f} seconds per operation"
+    f"{average_latency_ms:.4f} ms per operation"
 )

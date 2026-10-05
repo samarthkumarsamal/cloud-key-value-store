@@ -1,70 +1,121 @@
 # Single-Server Key-Value Store
 
-This project implements a basic single-server key-value store using Python and Flask. It supports storing, retrieving, and deleting key-value pairs through HTTP requests. The implementation also includes concurrent request handling, persistence, operation logging, error handling, and performance benchmarking.
+This project implements a single-server key-value store using Python, Flask, and Waitress. The server supports storing, retrieving, updating, and deleting key-value pairs through HTTP requests.
+
+The implementation also provides concurrent request handling, thread safety, periodic persistence, timestamped operation logging, error handling, and performance benchmarking.
 
 ## Features
 
-- Store and update key-value pairs
-- Retrieve values using GET requests
-- Delete key-value pairs using DELETE requests
+- Store and update key-value pairs using PUT
+- POST support for compatibility with the provided benchmark
+- Retrieve values using GET
+- Delete key-value pairs using DELETE
 - Thread-safe concurrent request handling
 - Periodic persistent storage using JSON
+- Automatic recovery of persisted data after restart
 - Timestamped operation logging
 - Graceful error handling
 - Background persistence to reduce request latency
 - Asynchronous logging
+- Waitress WSGI server
+- Persistent HTTP connection support
 - Benchmarking for throughput and average latency
+
+## Project Structure
+
+```text
+cloud-key-value-store/
+│
+├── server/
+│   └── app.py
+│
+├── benchmark/
+│   └── benchmark.py
+│
+├── data/
+│   └── store.json
+│
+├── logs/
+│   └── operations.log
+│
+├── .gitignore
+├── README.md
+├── REPORT.md
+└── requirements.txt
+```
+
+The `data/store.json` and `logs/operations.log` files are generated during execution and are excluded from Git through `.gitignore`.
 
 ## Installation
 
-1. Create a Python virtual environment:
+### 1. Create a virtual environment
 
-   ```bash
-   python -m venv venv
-   ```
+```bash
+python -m venv venv
+```
 
-2. Activate the virtual environment.
+### 2. Activate the virtual environment
 
-   On Windows Command Prompt:
+On Windows Command Prompt:
 
-   ```bash
-   venv\Scripts\activate
-   ```
+```cmd
+venv\Scripts\activate
+```
 
-   On macOS or Linux:
+On macOS or Linux:
 
-   ```bash
-   source venv/bin/activate
-   ```
+```bash
+source venv/bin/activate
+```
 
-3. Install the required dependencies:
+### 3. Install the required dependencies
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
+
+The required packages are:
+
+```text
+Flask
+requests
+waitress
+```
 
 ## Run the Server
 
-Start the key-value store server from the project root directory:
+Start the server from the project root directory:
 
 ```bash
 python server/app.py
 ```
 
-The server runs locally at:
+The server listens on:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-## API Usage
+The application uses Waitress as the WSGI server.
 
-### Store a Key-Value Pair
-
-The current implementation uses a POST request for storing values so that it remains compatible with the provided benchmark.
+To verify that the server is running:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/mykey -H "Content-Type: application/json" -d "{\"value\":\"hello\"}"
+curl http://127.0.0.1:8080/
+```
+
+Expected response:
+
+```text
+Key-Value Store Server is Running
+```
+
+## API Usage
+
+### PUT - Store or Update a Key-Value Pair
+
+```bash
+curl -X PUT http://127.0.0.1:8080/mykey -H "Content-Type: application/json" -d "{\"value\":\"hello\"}"
 ```
 
 Example response:
@@ -77,7 +128,15 @@ Example response:
 }
 ```
 
-### Retrieve a Value
+### POST - Benchmark Compatibility
+
+HTTP POST is also supported for storing values so that the server remains compatible with the benchmark provided for the assignment.
+
+```bash
+curl -X POST http://127.0.0.1:8080/mykey -H "Content-Type: application/json" -d "{\"value\":\"hello\"}"
+```
+
+### GET - Retrieve a Value
 
 ```bash
 curl http://127.0.0.1:8080/mykey
@@ -92,7 +151,7 @@ Example response:
 }
 ```
 
-### Delete a Key-Value Pair
+### DELETE - Remove a Key-Value Pair
 
 ```bash
 curl -X DELETE http://127.0.0.1:8080/mykey
@@ -108,9 +167,11 @@ Example response:
 }
 ```
 
-### Missing Key
+## Error Handling
 
-Requesting a key that does not exist returns an HTTP 404 response:
+Requesting a key that does not exist returns HTTP status code `404`.
+
+Example response:
 
 ```json
 {
@@ -118,33 +179,70 @@ Requesting a key that does not exist returns an HTTP 404 response:
 }
 ```
 
+Attempting to store a key without providing a `value` returns HTTP status code `400`.
+
+Example response:
+
+```json
+{
+  "error": "Value is required"
+}
+```
+
+## Concurrency
+
+The server supports multiple concurrent requests.
+
+A global `threading.Lock` protects the shared in-memory dictionary. This prevents race conditions when multiple requests attempt to read, update, or delete shared data at the same time.
+
+The check and modification of a key during DELETE are performed while holding the same lock to ensure consistency.
+
 ## Persistence
 
-The server stores key-value pairs in memory for fast access.
+The key-value store is primarily maintained in memory for fast access.
 
-Modified data is periodically saved to:
+When PUT, POST, or DELETE modifies the store, the application marks the data as changed. A background persistence thread periodically saves a snapshot of the dictionary to:
 
 ```text
 data/store.json
 ```
 
-A background persistence thread performs the disk write so that PUT and DELETE requests do not need to wait for file I/O.
+The persistence interval is five seconds.
 
-When the server starts, previously saved data is loaded back into memory.
+When the server starts, previously persisted data is automatically loaded back into memory.
+
+The persistence mechanism first writes data to a temporary file and then replaces the existing storage file. This reduces the risk of leaving a partially written persistence file.
+
+A final save is also attempted during normal application shutdown if unsaved changes remain.
 
 ## Logging
 
-GET, store, and DELETE operations are recorded with timestamps in:
+All GET, PUT, POST, and DELETE operations are recorded with timestamps in:
 
 ```text
 logs/operations.log
 ```
 
-Logging is handled asynchronously using a queue and background logging thread to reduce request latency.
+Logging is handled asynchronously using a queue and background logging thread so that HTTP requests do not need to wait for log-file writes.
+
+Example log entries:
+
+```text
+2026-10-05 14:20:00,123 - PUT key=testkey value=testvalue
+2026-10-05 14:20:01,234 - GET key=testkey
+2026-10-05 14:20:02,345 - DEL key=testkey
+2026-10-05 14:20:03,456 - GET failed key=testkey - Key Not Found
+```
 
 ## Run the Benchmark
 
-Keep the Flask server running in one terminal.
+Start the server in one terminal:
+
+```bash
+python server/app.py
+```
+
+Keep the server running.
 
 Open a second terminal from the project root directory and run:
 
@@ -152,35 +250,96 @@ Open a second terminal from the project root directory and run:
 python benchmark/benchmark.py
 ```
 
-The benchmark reports:
+The final benchmark configuration uses:
 
-- Total attempted operations
-- Successful operations
-- Failed operations
-- Total execution time
-- Throughput in operations per second
-- Average latency per operation
+```text
+Client threads: 3
+Total attempted operations: 300
+Client-side batching: No
+```
+
+Each store and GET operation is sent as an individual HTTP request.
+
+The benchmark uses `requests.Session` to reuse persistent HTTP connections. Connection reuse does not combine operations into batches; every operation remains an independent HTTP request.
 
 ## Benchmark Results
 
 ### Test Configuration
 
-- Concurrent worker threads: 3
+- Concurrent client threads: 3
 - Total HTTP operations per run: 300
+- Server: Waitress
 - Environment: Local machine using `127.0.0.1`
+- Client-side batching: No
+- Successful operations per run: 300
+- Failed operations per run: 0
 
-### Average Results Across Three Runs
+### Final Three Benchmark Runs
 
-- Successful operations: 300
-- Failed operations: 0
-- Average throughput: 919.84 operations per second
-- Average latency: 0.00323 seconds per operation
+| Run | Throughput | Average Latency |
+| --- | ---: | ---: |
+| 1 | 1873.28 operations/sec | 1.5889 ms |
+| 2 | 2119.01 operations/sec | 1.4000 ms |
+| 3 | 2069.63 operations/sec | 1.4344 ms |
+
+### Average Results
+
+```text
+Average Throughput: 2020.64 operations/second
+Average Latency: 1.4744 milliseconds/operation
+Successful Operations: 300/300
+Failed Operations: 0
+```
 
 ### Best Observed Run
 
-- Throughput: 926.85 operations per second
-- Average latency: 0.00322 seconds per operation
+```text
+Throughput: 2119.01 operations/second
+Average Latency: 1.4000 milliseconds/operation
+```
 
-All three measured benchmark runs completed 300 out of 300 operations successfully with zero failures.
+All benchmark runs completed all 300 attempted operations successfully with zero failures.
 
-Because the benchmark runs locally, the measured latency mainly reflects application processing and local operating system overhead rather than real network latency.
+Because the benchmark runs locally using `127.0.0.1`, the measured latency mainly represents application processing, HTTP handling, thread scheduling, logging, persistence overhead, and local operating-system activity rather than real network latency.
+
+Benchmark performance may vary depending on CPU utilization, operating-system scheduling, filesystem activity, and other background processes.
+
+## Technology Choices
+
+### Python
+
+Python was selected because it provides simple and readable support for networking, threading, JSON processing, logging, and file handling.
+
+### Flask
+
+Flask is used to define HTTP routes, process requests, and generate JSON responses.
+
+### Waitress
+
+Waitress is used as the WSGI server instead of Flask's built-in development server. It supports persistent HTTP connections and provides more appropriate server behavior for the final application.
+
+### Python Dictionary
+
+A Python dictionary is used as the in-memory key-value store because it provides efficient lookup, insertion, update, and deletion operations.
+
+### Threading Lock
+
+A global lock is used to protect shared data during concurrent access and prevent race conditions.
+
+## Assignment Requirements
+
+The implementation provides:
+
+- Standalone server listening on port 8080
+- GET operation
+- PUT operation
+- POST compatibility with the provided benchmark
+- DELETE operation
+- Concurrent request handling
+- Protection against concurrent PUT and DELETE operations
+- Periodic persistence to disk
+- Recovery of persisted data after restart
+- Missing-key error handling
+- Invalid-request error handling
+- Timestamped operation logging
+- Throughput and latency benchmarking
